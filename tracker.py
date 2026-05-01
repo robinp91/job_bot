@@ -202,7 +202,7 @@ def scrape_all_matching_jobs():
     matching = []
     seen_ids = set()
 
-    for page in range(1, 11):
+    for page in range(1, 101):
         print(f"  Page {page}...")
         jobs = fetch_jobs(page)
         if not jobs:
