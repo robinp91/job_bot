@@ -46,6 +46,8 @@ TARGET_KEYWORDS = [
     "xdr",
     "security",
     "technical support",
+    "focused services",
+    "support engineer",
 ]
 
 # Locations
