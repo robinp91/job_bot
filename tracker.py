@@ -48,6 +48,11 @@ TARGET_KEYWORDS = [
     "technical support",
     "focused services",
     "support engineer",
+    "solutions consultant",
+    "solution consultant",
+    "domain consultant",
+    "domain consulting",
+    "systems engineer",
 ]
 
 # Locations
