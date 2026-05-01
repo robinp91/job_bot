@@ -2,7 +2,7 @@ name: PAN Job Tracker
 
 on:
   schedule:
-    # Runs at 8:00 AM and 6:00 PM UTC (3 AM / 1 PM Central Time)
+    # Runs at 8 AM Central Time (1 PM UTC)
     # Adjust times to your preference using https://crontab.guru
     - cron: "0 13 * * *"
 
