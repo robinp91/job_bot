@@ -2,13 +2,19 @@
 """
 Palo Alto Networks Job Tracker
 Scrapes jobs.paloaltonetworks.com and sends email alerts for new matching jobs.
-Criteria: Cybersecurity/InfoSec roles in Austin, Dallas, or California
+
+Criteria:
+  - Department : Global Customer Services
+  - Keywords   : Cortex, SOAR, CNAPP, Prisma
+  - Seniority  : 3-7 years experience range
+                 (matched via title keywords: excludes Junior/Associate/Intern
+                  and excludes Staff/Principal/Director/VP/Fellow)
+  - Locations  : Austin, Dallas, California
 """
 
 import json
 import os
 import smtplib
-import sys
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -17,30 +23,32 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-# ── Configuration ────────────────────────────────────────────────────────────
+# Configuration
+BASE_URL   = "https://jobs.paloaltonetworks.com/en/search-jobs"
+SEEN_FILE  = Path("seen_jobs.json")
 
-BASE_URL = "https://jobs.paloaltonetworks.com/en/search-jobs"
-SEEN_FILE = Path("seen_jobs.json")
-
-# Departments that match Cybersecurity/InfoSec interest
+# Target Department
 TARGET_DEPARTMENTS = [
-    "infosec",
-    "information security",
-    "cybersecurity",
-    "unit 42",
-    "threat",
-    "security",
-    "sase",
-    "cortex",
-    "prisma",
-    "netsec",
+    "global customer services",
+    "customer services",
+    "customer success",
+    "technical support",
+    "gcs",
 ]
 
-# Locations to match (case-insensitive)
+# Product / Technology Keywords
+TARGET_KEYWORDS = [
+    "cortex",
+    "soar",
+    "cnapp",
+    "prisma",
+]
+
+# Locations
 TARGET_LOCATIONS = [
     "austin",
     "dallas",
-    "plano",        # DFW metro
+    "plano",
     "california",
     "santa clara",
     "san francisco",
@@ -51,11 +59,36 @@ TARGET_LOCATIONS = [
     "irvine",
 ]
 
-# Email config — set these as GitHub Actions secrets (see README)
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-EMAIL_SENDER = os.environ.get("EMAIL_SENDER", "")
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
+# Too junior (exclude)
+EXCLUDE_SENIORITY = [
+    "junior",
+    "associate",
+    "intern",
+    "entry",
+    "apprentice",
+    "graduate",
+    "new grad",
+]
+
+# Too senior (exclude)
+EXCLUDE_OVER_SENIORITY = [
+    "sr. staff",
+    "senior staff",
+    "principal",
+    "director",
+    "vice president",
+    " vp ",
+    "fellow",
+    "distinguished",
+    "head of",
+    "chief",
+]
+
+# Email config
+SMTP_HOST       = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT       = int(os.environ.get("SMTP_PORT", "587"))
+EMAIL_SENDER    = os.environ.get("EMAIL_SENDER", "")
+EMAIL_PASSWORD  = os.environ.get("EMAIL_PASSWORD", "")
 EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT", "")
 
 HEADERS = {
@@ -66,98 +99,89 @@ HEADERS = {
     )
 }
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# Filter functions
 
-def load_seen() -> set:
-    if SEEN_FILE.exists():
-        with open(SEEN_FILE) as f:
-            return set(json.load(f))
-    return set()
-
-
-def save_seen(seen: set):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(sorted(seen), f, indent=2)
-
-
-def matches_location(location_text: str) -> bool:
+def matches_location(location_text):
     loc = location_text.lower()
     return any(target in loc for target in TARGET_LOCATIONS)
 
-
-def matches_department(title: str, dept: str) -> bool:
+def matches_department(title, dept):
     combined = (title + " " + dept).lower()
     return any(kw in combined for kw in TARGET_DEPARTMENTS)
 
+def matches_keyword(title, dept):
+    combined = (title + " " + dept).lower()
+    return any(kw in combined for kw in TARGET_KEYWORDS)
 
-# ── Scraping ─────────────────────────────────────────────────────────────────
+def matches_seniority(title):
+    t = title.lower()
+    if any(kw in t for kw in EXCLUDE_SENIORITY):
+        return False
+    if any(kw in t for kw in EXCLUDE_OVER_SENIORITY):
+        return False
+    return True
 
-def fetch_jobs(page: int = 1) -> list[dict]:
-    """Fetch one page of search results and return list of job dicts."""
+def matches_all(job):
+    title = job.get("title", "")
+    dept  = job.get("department", "")
+    loc   = job.get("location", "")
+    return (
+        matches_location(loc)
+        and matches_department(title, dept)
+        and matches_keyword(title, dept)
+        and matches_seniority(title)
+    )
+
+# Scraping
+
+def fetch_jobs(page=1):
     params = {"p": page}
     try:
         resp = requests.get(BASE_URL, params=params, headers=HEADERS, timeout=15)
         resp.raise_for_status()
     except requests.RequestException as e:
-        print(f"  ⚠️  Request error on page {page}: {e}")
+        print(f"  Warning: Request error on page {page}: {e}")
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
     jobs = []
 
-    # Each job is an <li> inside the results list
     for item in soup.select("ul.jobs-list li, #search-results-list li"):
         link_tag = item.find("a")
         if not link_tag:
             continue
 
         title = link_tag.get_text(strip=True)
-        url = link_tag.get("href", "")
+        url   = link_tag.get("href", "")
         if url and not url.startswith("http"):
             url = "https://jobs.paloaltonetworks.com" + url
 
-        # Location and department live in sibling elements
-        location = ""
+        location   = ""
         department = ""
         spans = item.find_all(["span", "p"])
         for span in spans:
             text = span.get_text(strip=True)
-            if "," in text and not location:   # heuristic: "Austin, Texas, United States"
+            if "," in text and not location:
                 location = text
             elif location and not department:
                 department = text
 
         if title:
             jobs.append({
-                "id": url,
-                "title": title,
-                "location": location,
+                "id":         url,
+                "title":      title,
+                "location":   location,
                 "department": department,
-                "url": url,
+                "url":        url,
             })
 
     return jobs
 
-
-def get_total_pages(soup) -> int:
-    """Try to extract total page count from the pagination element."""
-    page_info = soup.find(string=lambda t: t and "/ 70" in str(t))
-    if page_info:
-        try:
-            return int(str(page_info).split("/")[-1].strip().split()[0])
-        except Exception:
-            pass
-    return 5  # safe default — covers ~75 jobs
-
-
-def scrape_all_matching_jobs() -> list[dict]:
-    """Scrape pages until we've checked enough, return only matching jobs."""
-    print("🔍 Scraping Palo Alto Networks jobs...")
+def scrape_all_matching_jobs():
+    print("Scraping Palo Alto Networks jobs...")
     matching = []
-    seen_titles = set()
+    seen_ids = set()
 
-    # We scrape up to 10 pages (150 jobs). PAN sorts by date desc,
-    # so newer jobs appear first — we'll catch fresh postings quickly.
     for page in range(1, 11):
         print(f"  Page {page}...")
         jobs = fetch_jobs(page)
@@ -165,20 +189,32 @@ def scrape_all_matching_jobs() -> list[dict]:
             break
 
         for job in jobs:
-            if job["id"] in seen_titles:
+            if job["id"] in seen_ids:
                 continue
-            seen_titles.add(job["id"])
+            seen_ids.add(job["id"])
 
-            if matches_location(job["location"]) and matches_department(job["title"], job["department"]):
+            if matches_all(job):
                 matching.append(job)
+                print(f"  MATCH: {job['title']} | {job['location']}")
 
-    print(f"✅ Found {len(matching)} matching jobs total.")
+    print(f"\nFound {len(matching)} matching jobs total.")
     return matching
 
+# Seen jobs tracking
 
-# ── Email ────────────────────────────────────────────────────────────────────
+def load_seen():
+    if SEEN_FILE.exists():
+        with open(SEEN_FILE) as f:
+            return set(json.load(f))
+    return set()
 
-def build_email_html(new_jobs: list[dict]) -> str:
+def save_seen(seen):
+    with open(SEEN_FILE, "w") as f:
+        json.dump(sorted(seen), f, indent=2)
+
+# Email
+
+def build_email_html(new_jobs):
     rows = ""
     for job in new_jobs:
         rows += f"""
@@ -199,11 +235,19 @@ def build_email_html(new_jobs: list[dict]) -> str:
     return f"""
     <html><body style="font-family:Arial,sans-serif; color:#222; max-width:700px; margin:auto;">
       <div style="background:#0070c9; padding:20px 24px; border-radius:8px 8px 0 0;">
-        <h2 style="color:white; margin:0;">🔐 New PAN Job Alerts</h2>
-        <p style="color:#cce4ff; margin:4px 0 0;">{len(new_jobs)} new posting(s) — {datetime.now().strftime('%B %d, %Y %I:%M %p')}</p>
+        <h2 style="color:white; margin:0;">New PAN Job Alerts</h2>
+        <p style="color:#cce4ff; margin:4px 0 0;">
+          {len(new_jobs)} new posting(s) - {datetime.now().strftime('%B %d, %Y %I:%M %p')}
+        </p>
       </div>
       <div style="border:1px solid #ddd; border-top:none; border-radius:0 0 8px 8px; padding:16px;">
-        <p>New <strong>Cybersecurity/InfoSec</strong> roles in <strong>Austin, Dallas, or California</strong>:</p>
+        <p style="margin:0 0 4px;"><strong>Your active filters:</strong></p>
+        <ul style="color:#555; font-size:13px;">
+          <li><strong>Department:</strong> Global Customer Services</li>
+          <li><strong>Keywords:</strong> Cortex, SOAR, CNAPP, Prisma</li>
+          <li><strong>Seniority:</strong> 3-7 years (Mid / Senior level)</li>
+          <li><strong>Locations:</strong> Austin, Dallas, California</li>
+        </ul>
         <table style="width:100%; border-collapse:collapse; font-size:14px;">
           <thead>
             <tr style="background:#f5f5f5;">
@@ -215,26 +259,23 @@ def build_email_html(new_jobs: list[dict]) -> str:
           <tbody>{rows}</tbody>
         </table>
         <p style="margin-top:20px; font-size:12px; color:#888;">
-          You're receiving this because you set up a PAN job tracker. 
-          <a href="https://jobs.paloaltonetworks.com/en/search-jobs">View all jobs →</a>
+          <a href="https://jobs.paloaltonetworks.com/en/search-jobs">View all PAN jobs</a>
         </p>
       </div>
     </body></html>
     """
 
-
-def send_email(new_jobs: list[dict]):
+def send_email(new_jobs):
     if not all([EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
-        print("⚠️  Email env vars not set — skipping send. (Set EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENT)")
+        print("Email env vars not set - printing matches instead:")
         for j in new_jobs:
-            print(f"  NEW: {j['title']} | {j['location']}")
+            print(f"  - {j['title']} | {j['location']}")
         return
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"🔐 {len(new_jobs)} New PAN Cybersecurity Job(s) — Austin/Dallas/CA"
-    msg["From"] = EMAIL_SENDER
-    msg["To"] = EMAIL_RECIPIENT
-
+    msg["Subject"] = f"{len(new_jobs)} New PAN Job(s) - GCS / Cortex / Prisma / SOAR"
+    msg["From"]    = EMAIL_SENDER
+    msg["To"]      = EMAIL_RECIPIENT
     msg.attach(MIMEText(build_email_html(new_jobs), "html"))
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -243,31 +284,23 @@ def send_email(new_jobs: list[dict]):
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, msg.as_string())
 
-    print(f"📧 Email sent with {len(new_jobs)} new job(s).")
+    print(f"Email sent with {len(new_jobs)} new job(s).")
 
-
-# ── Main ─────────────────────────────────────────────────────────────────────
+# Main
 
 def main():
-    seen = load_seen()
+    seen         = load_seen()
     all_matching = scrape_all_matching_jobs()
+    new_jobs     = [j for j in all_matching if j["id"] not in seen]
 
-    new_jobs = [j for j in all_matching if j["id"] not in seen]
-    print(f"🆕 {len(new_jobs)} new job(s) since last run.")
+    print(f"{len(new_jobs)} new job(s) since last run.")
 
     if new_jobs:
         send_email(new_jobs)
-        # Mark all as seen
         seen.update(j["id"] for j in new_jobs)
         save_seen(seen)
     else:
-        print("No new jobs — nothing to send.")
-
-    # Always update seen with full current list (handles removed jobs gracefully)
-    # Uncomment below if you want to re-alert on jobs that were removed and re-posted:
-    # seen = set(j["id"] for j in all_matching)
-    # save_seen(seen)
-
+        print("No new jobs - nothing to send.")
 
 if __name__ == "__main__":
     main()
