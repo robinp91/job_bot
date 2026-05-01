@@ -156,20 +156,35 @@ def fetch_jobs(page=1):
         if not link_tag:
             continue
 
-        title = link_tag.get_text(strip=True)
-        url   = link_tag.get("href", "")
+        # Full text is jammed together e.g:
+        # "Sr. Technical Support EngineerSanta Clara, California, United StatesGlobal Customer Services"
+        full_text = link_tag.get_text(strip=True)
+        url = link_tag.get("href", "")
         if url and not url.startswith("http"):
             url = "https://jobs.paloaltonetworks.com" + url
 
-        location   = ""
+        # Location is always "City, State, Country" — find it via comma pattern
+        import re
+        # Match: anything with at least 2 commas = location block
+        loc_match = re.search(r'([A-Z][^,]+,\s*[^,]+,\s*[^\d]+?)(?=[A-Z][a-z]|$)', full_text)
+
+        location = ""
+        title = full_text
         department = ""
-        spans = item.find_all(["span", "p"])
-        for span in spans:
-            text = span.get_text(strip=True)
-            if "," in text and not location:
-                location = text
-            elif location and not department:
-                department = text
+
+        # Split using the spans instead — they hold clean individual values
+        spans = item.find_all("span")
+        span_texts = [s.get_text(strip=True) for s in spans if s.get_text(strip=True)]
+
+        if len(span_texts) >= 2:
+            location = span_texts[0]   # "Santa Clara, California, United States"
+            department = span_texts[1] # "Global Customer Services"
+
+        # Title = full_text minus the location and department suffixes
+        if location and location in full_text:
+            title = full_text.split(location)[0].strip()
+        elif department and department in full_text:
+            title = full_text.split(department)[0].strip()
 
         if title:
             jobs.append({
