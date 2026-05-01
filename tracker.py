@@ -42,6 +42,10 @@ TARGET_KEYWORDS = [
     "soar",
     "cnapp",
     "prisma",
+    "xsiam",
+    "xdr",
+    "security",
+    "technical support",
 ]
 
 # Locations
@@ -127,7 +131,6 @@ def matches_all(job):
     loc   = job.get("location", "")
     return (
         matches_location(loc)
-        and matches_department(title, dept)
         and matches_keyword(title, dept)
         and matches_seniority(title)
     )
